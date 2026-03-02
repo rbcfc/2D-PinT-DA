@@ -20,7 +20,6 @@ module eigenvalues
 
   real,dimension(:),allocatable :: work_dgesvd
 
-  real,dimension(:),allocatable :: pold_conjgrad
 
 contains
 
@@ -209,110 +208,6 @@ endif
 
 end subroutine compute_eigenvalues
 
-subroutine conjgrad(matrix_v,b,x,n,eps,observation,exact_matrix,forward_matrix)
-
-
-  procedure(matrix_vector) :: matrix_v
-  procedure(matrix_vector), optional :: exact_matrix, forward_matrix 
-  integer :: n
-  real,dimension(n) :: b,x,obs
-  real :: eps
-
-  real,dimension(n) :: r,Ax,Ap,p,Apold,pold,ptmp
-  integer :: iteration
-
-  real :: rsold,rsnew,alpha,tmp,cf,res,tmp2,grad,quad
-  real, dimension(:), allocatable :: Aptmp, cftmp
-
-  logical :: exists
-  double precision :: dnrm2
-
-  real, dimension(n), optional :: observation
-  real :: equad
-
-  call matrix_v(n,x,Ax)
-
-  r = b -Ax
-
-  if (verbose_cg .eqv. .true.) then
-    print *,'r = ',DOT_PRODUCT(r,r)
-    print *,'bnorm = ',DOT_PRODUCT(b,b),sqrt(DOT_PRODUCT(b,b))
-  end if
-  p = r
-  rsold = DOT_PRODUCT(r,r)
-
-  equad = -46.491068930860784
-
-  iteration = 1
-  do while (.TRUE.)
-
-    print *, '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
-    print *, 'CG iteration number ', iteration
-    write (*,*)
-    call matrix_v(n,p,Ap)
-
-    alpha = rsold / DOT_PRODUCT(p,Ap)
-    x = x + alpha * p
-    r = r - alpha * Ap
-    rsnew = DOT_PRODUCT(r,r)
-
-    if (verbose_cg .eqv. .true.) then
-      print *,'ratio = ',rsnew/rsold
-      print *,'iter = ',iteration,rsnew,'r2-norm: ',sqrt(rsnew)
-    end if
-   
-    if(PRESENT(observation)) then
-      if(PRESENT(forward_matrix)) then
-        allocate (cftmp(n))
-        call forward_matrix(n,x,cftmp)
-        cf = 0.5*dnrm2(n,cftmp - observation,1)
-        cf = cf + 0.5*5*(dnrm2(n,x,1))**2
-        print *, 'cost function value : ', cf
-
-        deallocate(cftmp)
-      end if
-    end if 
-
-    !call matrixnorminv(exact_matrix,r,n,tmp)
-    !print *, 'A-1 norm of r: ',tmp
-    
-    if (PRESENT(exact_matrix)) then
-      allocate(Aptmp(n))
-      call exact_matrix(n,x,Aptmp)
-
-      quad = 0.5*DOT_PRODUCT(x,APtmp) - DOT_PRODUCT(b,x)
-      print *, 'quadratic value : ', quad
-
-      tmp =  SQRT(2*(quad - equad))
-      print *, 'A-1 norm of r', tmp
-      deallocate(Aptmp)
-    end if
-
-    inquire(file="ecg_norm.csv",exist = exists)
-    if(exists) then
-      open(2,file='ecg_norm.csv',form='formatted',status = 'old', position = 'append',action='write')
-    else
-      open(2,file='ecg_norm.csv',form='formatted',status = 'new', position = 'append',action='write')
-    end if
-
-    write(2,'(F15.10,F15.10,F15.10,F15.10)') sqrt(rsnew), cf, quad, tmp
-    close(2)
-
-    if (sqrt(rsnew) < eps) exit
-
-    p = r + (rsnew/rsold) * p
-    rsold = rsnew
-
-    iteration = iteration + 1
-    !print *, 'interation counter changes to iter = ', iteration
-  enddo
-
-  if (verbose_cg .eqv. .true.) then
-    print *, '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
-    print *,'lastiter = ',iteration,rsnew,sqrt(rsnew)
-  end if
-
-end subroutine conjgrad
 
 subroutine gmres( matrix_v, n, x, rhs, itr_max, mr, tol_abs, &
   tol_rel)

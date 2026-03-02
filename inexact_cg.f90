@@ -2,6 +2,7 @@
 module inexact_version
 
 use parareal_utils
+use eigenvalues
 
 contains
 
@@ -31,14 +32,20 @@ end subroutine residual
 subroutine cost_func(nx,x,y,ob)
 
   integer :: nx,i
-  real, dimension(nx) :: x,y1,ob
-  real :: y
+  real, dimension(nx,Nobs) :: y1, ob
+  real, dimension(nx) :: x
+  real :: y, temp
   double precision :: dnrm2
   
   real :: res
 
   call Fmatrix(nx,x,y1)
-  y = 0.5*dnrm2(nx,y1-ob,1)
+
+  y=0.
+  do i = 1,Nobs
+    temp = 0.5*dnrm2(nx,y1(:,i)-ob(:,i),1)
+    y = y + temp
+  end do
 
   if (regularisation) then
     y = y + 0.5*alpharegul*(dnrm2(nx,x,1))**2
@@ -142,39 +149,41 @@ end subroutine inexact_quadratic
 subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
   
   integer :: n
-  real, dimension(n) :: b, x, x_new, Ax, c, c1, c3
+  real, dimension(n) :: b, x, x_new, c, c1, ep_k, ep_k1
   real, dimension(n) :: r, p, p_new, r_new
-  real, dimension(:), allocatable :: q1, cf1
+  real, dimension(:), allocatable :: q1
+  real, dimension(:,:), allocatable :: cf1
   
-  real :: eps, phi, phi_new, omega, omega2, e, e1, c2, c4
+  real :: eps, phi, phi_new, omega, omega2, e, e1, c2, c4, c5, c6
   real :: alpha, beta_old, beta_new, bound
   real :: omega_hat, phi_hat, rinvnorm
 
   integer :: iteration, nitermax
   real :: big_phi_new, big_phi = 1.
-  integer :: d, k, i, l
-  real, dimension(:,:), allocatable :: para_sol, p_sol, p_sol1 
+  integer :: d, k, i, j 
+  real, dimension(:,:), allocatable :: para_sol
 
   logical :: reorth = .true.
   logical :: inacc_budget = .true.
-  logical :: cp
 
-  integer :: k1, it_out, ksol, k_bar, k2
-  real :: xout, xout1, xout2, q, cf, q2
+  integer :: k1, it_out, ksol, k2, icf
+  real :: xout, xout1, xout2, q, cf, q2, cf_temp
   real :: bnorm, pnorm, r2norm, exact_pnorm, exact_bnorm, exact_ebound
-  real, dimension(n) :: tmp, tmp1, tmp3, tmp4, tmp5, x_est, obs, gap1, gap2 
-  real, dimension(:), allocatable :: res, sol1, sol2
+  real, dimension(n) :: temp, tmp1, tmp3, tmp4, tmp5, tmp6, gap1, gap2 
+  real, dimension(n) :: ep_temp, ep_temp1
+  real, dimension(:), allocatable :: sol1
   real, dimension(:,:), allocatable :: u
-  real :: res1, res2, tmp2, xi1, xi2
+  real :: res2, xi1, xi2
   
-  real :: eps1
+  integer, dimension(nitermax) :: it_array
+  real, dimension(n,N_time_windows,N_time_windows) :: all_iter
 
   double precision :: dnrm2
-  logical :: exists
+  logical :: file_exists
 
   real, dimension(0:nitermax) :: quad_vals
   
-  real, dimension(n), optional :: observation
+  real, dimension(n,Nobs), optional :: observation
  
   if (regularisation) then
     print *, 'regularisation constant for inexact cg', alpharegul
@@ -184,14 +193,16 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
   beta_old = (dnrm2(n,b,1))**2
   print *,'beta old = ', beta_old 
 
-  !call matrixnorminv(Mmatrix,b,n,exact_bnorm)
-  !exact_bnorm = 9.6549753709801731  
+  !if (Nobs > 1) then
+  !  call matrixnorminv(Mmatrix,b,n,exact_bnorm,eps=1.)
+  !else
+  !  call matrixnorminv(Mmatrix,b,n,exact_bnorm,eps=1.D-1)
+  !end if
 
-  !alpharegul = 5
-  exact_bnorm = 9.6557121601659652 
+  !exact_bnorm = 9.6557121601659652 
+  exact_bnorm = 11.894898781675595
+
   print *, 'bnorm = ', exact_bnorm
-
-  eps1 = 1.      
 
   r = -b
   p = b
@@ -203,12 +214,27 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
   phi = nitermax
   print *, 'nitermax = ', nitermax
 
-  allocate(u(n,0:2*N_time_windows))
+  allocate(q1(n),u(n,0:2*N_time_windows))
   u(:,0) = b/beta_old
   
   quad_vals(0) = 0
 
-  d = 2 
+  d = 1 
+
+  inquire(file="inexact_cg.csv", exist=file_exists)
+
+  if (.not. file_exists) then
+    open(3, file='inexact_cg.csv', form='formatted', status='new')
+    write(3, '(A)') 'iteration,r2norm,rinvnorm,omega,omega2,cost_func,quadratic,res_gap'
+    close(3)
+  end if
+
+  cf = 0.0
+  q = 0.0
+  res2 = 0.0
+  rinvnorm = 0.0
+  omega = 0.0
+  omega2 = 0.0
 
   do while (.true.)
 
@@ -243,8 +269,8 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
 
     end if 
 
-    inquire(file="exact_norm.csv",exist = exists)
-    if(exists) then
+    inquire(file="exact_norm.csv",exist = file_exists)
+    if(file_exists) then
        open(4,file='exact_norm.csv',form='formatted',status = 'old', position = 'append',action='write')
     else
        open(4,file='exact_norm.csv',form='formatted',status = 'new', position = 'append',action='write')
@@ -253,181 +279,171 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
     write(4,'(F15.10,F15.10,F15.10,F15.10)') exact_pnorm, omega, omega2, bnorm  
     close(4)
 
-    !!!!!! with  exact ||Ep||_A^{-1} !!!!!!
-    !k1 = 1 
-    
-    !if(allocated(para_sol)) then
-      !deallocate(para_sol)
-    !end if
 
-    !call set_pverbose(.false.)
-    !call parareal(FineGrid,CoarseGrid,p,sol1,maxk=8,iter_out=it_out,full_sol=para_sol)
-
-    !call FMatrix(n,p,tmp1) 
-
-    !do while (k1<=N_time_windows)
-      
-      !e = dnrm2(n,para_sol(:,k1) - tmp1,1)
-      !print *, 'exact ep norm at parareal iteration ', k1, ' = ', e
-
-      !if (e > omega2) then
-        !k1 = k1+1
-        !cycle
-      !else
-        !omega_hat = e
-        !print *, 'omega hat: ', omega_hat
-        !ksol = k1
-        !print *, 'Number of parareal iterations = ', ksol
-
-        !c = para_sol(:,ksol)
-        !do i =N_time_windows-1,0,-1
-          !call INTEGRATE_SW_ADJOINT(xnb=c,nt=curgrid%nt_time_windows)
-        !end do
-        !if (regularisation) then
-          !call identity_matrix(n,p,tmp3)
-          !c = c + alpharegul*tmp3
-        !end if
-        !exit
-      !end if
-    !end do
-
-
-!!!!!!!!!!!! Using last parareal iterate !!!!!!!!!!!!!!!!!!!!
-!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-    if (.true.) then
+    !!!!!!!!!!!! Using last parareal iterate for ||Ep||_A^-1 approximation !!!!!!!!!!!!
     if (iteration .eq. 0) then
       call Mmatrix(n,p,c)
     end if
 
-
     if (iteration .gt. 0) then
 
-    if (allocated(para_sol)) then
-      deallocate(para_sol)
-    end if
-    
-    call set_pverbose(.false.)
-
-    call parareal(FineGrid,CoarseGrid,p,sol1,maxk=10,iter_out=it_out,full_sol=para_sol)
-    print *, 'no of iter check', it_out
-    
-    write(*,*)
-
-    do k1 = 1,N_time_windows
-
-      !!!!!!!!! p norm approximations !!!!!!!!!
-      c1 = para_sol(:,k1)
-      c2 = DOT_PRODUCT(c1,c1)
-
-      write(*,*)
-      if (regularisation) then
-        call identity_matrix(n,p,tmp4)
-        pnorm = sqrt(c2 + alpharegul*DOT_PRODUCT(p,tmp4))
-      else
-        pnorm = sqrt(c2)
+      if (allocated(para_sol)) then
+        deallocate(para_sol)
       end if
-      print *, 'approx pnorm at iteration ', k1, '=', pnorm
-
-      call E_bound(eps,exact_bnorm,pnorm,r2norm,phi,xi1)
-      xout1 = xi1*pnorm 
-      print *, 'omega2 with approx pnorm ',xout1
-
-      call E_bound(eps,bnorm,exact_pnorm,r2norm,phi,xi2)
-      xout2 = xi2*exact_pnorm
-      print *, 'omega2 with approx bnorm ',xout2
-
-      call E_bound(eps,bnorm,pnorm,r2norm,phi,xout)
-      omega = xout
-
-      print *, 'omega = ', omega
     
-      omega2 = omega*pnorm
-      print *, 'omega2 = ', omega2
+      call set_pverbose(.false.)
 
-      e = dnrm2(n,para_sol(:,k1+1)-para_sol(:,k1),1)
-      print *, 'approx ep norm at iteration ', k1, ' = ', e
-
-    inquire(file="para_norms.csv",exist = exists)
-    if(exists) then
-       open(5,file='para_norms.csv',form='formatted',status = 'old', position = 'append',action='write')
-    else
-       open(5,file='para_norms.csv',form='formatted',status = 'new', position = 'append',action='write')
-    end if
-
-    write(5,'(F15.10,F15.10,F15.10,F15.10,F15.10,F15.10)') pnorm, omega, omega2, e, xout1, xout2
-    close(5)
+      call parareal(FineGrid,CoarseGrid,p,sol1,maxk=13,iter_out=it_out,full_sol=para_sol,all_iterates=all_iter)
+      print *, 'no of iter check', it_out
 
       write(*,*)
-      if (e < omega2) then
-        omega_hat = e
-        print *, 'omega_hat : ', omega_hat
-        print *, 'parareal iterations ', k1+1
+      
+      do k1 = 1,N_time_windows
 
-        c3 = para_sol(:,k1+1)
-        c4 = DOT_PRODUCT(c3,c3)
+        !!!!!!!!! p norm approximations !!!!!!!!!
+        c2 = 0.0
+        do i = 1, Nobs
+          c1 = all_iter(:,obs_windows(i),k1)
+          where (.not. obs_mask(:, i)) c1 = 0.0
 
+          c6 = DOT_PRODUCT(c1,c1)
+          c2 = c2+c6
+        end do
+
+        write(*,*)
         if (regularisation) then
-          call identity_matrix(n,p,tmp5)
-          pnorm = sqrt(c4 + alpharegul*DOT_PRODUCT(p,tmp5))
+          call identity_matrix(n,p,tmp4)
+          pnorm = sqrt(c2 + alpharegul*DOT_PRODUCT(p,tmp4))
         else
-          pnorm = sqrt(c4)
+          pnorm = sqrt(c2)
         end if
-        print *, 'actual pnorm used at iteration ', k1+1, '=', pnorm
-        ksol = k1
-        exit
-      end if
-    end do
+        print *, 'approx pnorm at iteration ', k1, '=', pnorm
 
-    write(*,*)
+        call E_bound(eps,exact_bnorm,pnorm,r2norm,phi,xi1)
+        xout1 = xi1*pnorm 
+        print *, 'omega2 with approx pnorm ',xout1
 
-    call FMatrix(n,p,tmp1) 
-    do k2 =1,ksol
-      e1 = dnrm2(n,para_sol(:,k2) - tmp1,1)
-      print *, 'exact ep norm at parareal iteration ', k2, ' = ', e1
+        call E_bound(eps,bnorm,exact_pnorm,r2norm,phi,xi2)
+        xout2 = xi2*exact_pnorm
+        print *, 'omega2 with approx bnorm ',xout2
 
-      inquire(file="exact_ep.csv",exist = exists)
-      if(exists) then
-        open(10,file='exact_ep.csv',form='formatted',status = 'old', position = 'append',action='write')
-      else
-        open(10,file='exact_ep.csv',form='formatted',status = 'new', position = 'append',action='write')
-      end if
+        call E_bound(eps,bnorm,pnorm,r2norm,phi,xout)
+        omega = xout
 
-      write(10,'(F15.10)') e1  
-      close(10)
+        print *, 'omega = ', omega
+      
+        omega2 = omega*pnorm
+        print *, 'omega2 = ', omega2
 
-    end do
+        
+        ! ep norm approximation
+        ep_k = 0.
+        ep_k1 = 0.
+
+        do i = 1, Nobs
+          ep_temp = all_iter(:,obs_windows(i),k1)
+          ep_temp1 = all_iter(:,obs_windows(i),k1+1)
+          where (.not. obs_mask(:, i)) ep_temp  = 0.0
+          where (.not. obs_mask(:, i)) ep_temp1 = 0.0
+
+          ep_k = ep_k+ep_temp
+          ep_k1 = ep_k1+ep_temp1
+        end do
+
+        e = dnrm2(n,ep_k-ep_k1,1)
+        print *, 'approx ep norm at iteration ', k1, ' = ', e
+
+        inquire(file="para_norms.csv",exist = file_exists)
+        if(file_exists) then
+           open(5,file='para_norms.csv',form='formatted',status = 'old', position = 'append',action='write')
+        else
+           open(5,file='para_norms.csv',form='formatted',status = 'new', position = 'append',action='write')
+        end if
+
+        write(5,'(F15.10,F15.10,F15.10,F15.10,F15.10,F15.10)') pnorm, omega, omega2, e, xout1, xout2
+        close(5)
+
+        write(*,*)
+        if (e < omega2) then
+          omega_hat = e
+          print *, 'omega_hat : ', omega_hat
+          print *, 'parareal iterations ', k1+1
+          
+          c4 = 0.0
+          do i = 1, Nobs
+            temp = all_iter(:,obs_windows(i),k1+1)
+            where (.not. obs_mask(:, i)) temp = 0.0
+            c5 = DOT_PRODUCT(temp,temp)
+            c4 = c4 +c5
+          end do
+
+          if (regularisation) then
+            call identity_matrix(n,p,tmp5)
+            pnorm = sqrt(c4 + alpharegul*DOT_PRODUCT(p,tmp5))
+          else
+            pnorm = sqrt(c4)
+          end if
+          print *, 'actual pnorm used at iteration ', k1+1, '=', pnorm
+          ksol = k1
+          exit
+        end if
+      end do
+
+      write(*,*)
+
+      call Fmatrix(n,p,tmp1) 
+      do k2 =1,ksol
+        e1 = dnrm2(n,para_sol(:,k2) - tmp1,1)
+        print *, 'exact ep norm at parareal iteration ', k2, ' = ', e1
+
+        inquire(file="exact_ep.csv",exist = file_exists)
+        if(file_exists) then
+          open(10,file='exact_ep.csv',form='formatted',status = 'old', position = 'append',action='write')
+        else
+          open(10,file='exact_ep.csv',form='formatted',status = 'new', position = 'append',action='write')
+        end if
+
+        write(10,'(F15.10)') e1  
+        close(10)
+
+      end do
     
-    print *, 'ksol for c calculation', ksol
+      print *, 'ksol for c calculation', ksol
 
-    c = para_sol(:,ksol)
-    do i =N_time_windows-1,0,-1
-      call INTEGRATE_SW_ADJOINT(xnb=c,nt=curgrid%nt_time_windows)
-    end do
-    if (regularisation) then
-      call identity_matrix(n,p,tmp3)
-      c = c + alpharegul*tmp3
-    end if
+      c = 0.
+      do i = 1, Nobs
+        tmp6 = all_iter(:,obs_windows(i),ksol)
+        where (.not. obs_mask(:, i)) tmp6 = 0.0
 
-    if (inacc_budget) then
-      phi_hat = ((pnorm - omega_hat)*SQRT(eps)*bnorm*pnorm)/(omega_hat*2*((r2norm)**2))
-      !phi_hat = ((exact_pnorm - omega_hat)*SQRT(eps)*exact_bnorm*exact_pnorm)/(omega_hat*2*((r2norm)**2))
+        do j = obs_windows(i)-1,0,-1
+          call INTEGRATE_SW_ADJOINT(xnb=tmp6,nt=curgrid%nt_time_windows)
+        end do
+        c = c + tmp6
+      end do
 
-      print *, 'phi: ', phi, 'phi_hat: ', phi_hat, 'phi_hat > phi :', phi_hat>phi
-
-      big_phi_new = big_phi - (1/phi_hat)
-
-      if (iteration < nitermax) then
-        phi_new = (nitermax-iteration-1)/big_phi_new
-      else
-        phi_new = phi
+      if (regularisation) then
+        call identity_matrix(n,p,tmp3)
+        c = c + alpharegul*tmp3
       end if
 
-      phi = phi_new
-      big_phi = big_phi_new
+      if (inacc_budget) then
+        phi_hat = ((pnorm - omega_hat)*SQRT(eps)*bnorm*pnorm)/(omega_hat*2*((r2norm)**2))
+        !phi_hat = ((exact_pnorm - omega_hat)*SQRT(eps)*exact_bnorm*exact_pnorm)/(omega_hat*2*((r2norm)**2))
 
-    end if
-    end if
-    
+        print *, 'phi: ', phi, 'phi_hat: ', phi_hat, 'phi_hat > phi :', phi_hat>phi
+
+        big_phi_new = big_phi - (1/phi_hat)
+
+        if (iteration < nitermax) then
+          phi_new = (nitermax-iteration-1)/big_phi_new
+        else
+          phi_new = phi
+        end if
+
+        phi = phi_new
+        big_phi = big_phi_new
+
+      end if
     end if
 
 
@@ -439,11 +455,15 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
       
       write(*,*)
       if(present(observation)) then
-        allocate(cf1(n))
+        allocate(cf1(n,Nobs))
         call Fmatrix(n,x_new,cf1)
-        cf = 0.5*(dnrm2(n,cf1-observation,1))**2
+        cf = 0.0
+        do icf = 1,Nobs
+          cf_temp = 0.5*(dnrm2(n,cf1(:,icf) - observation(:,icf),1))**2
+          cf = cf + cf_temp
+        end do
         if (regularisation) then
-          cf = cf + 0.5*alpharegul*(dnrm2(n,x,1))**2
+          cf = cf + 0.5*alpharegul*(dnrm2(n,x_new,1))**2
         end if
         print *, 'cost func value: ', cf
         deallocate(cf1)
@@ -453,22 +473,20 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
       quad_vals(iteration+1) = q2
       print *, 'approx quadratic at iteration ', iteration, ' = ', q2
 
-      allocate(q1(n))
       call Mmatrix(n,x_new,q1)
       q = 0.5*DOT_PRODUCT(x_new,q1) - DOT_PRODUCT(b,x_new)
       print *, 'exact quadratic value ', q
-      deallocate(q1)
       
       print *, '2-norm of r :', dnrm2(n,r_new,1)
     
-      call matrixnorminv(Mmatrix,r_new,n,xout,eps=eps1)
+      call matrixnorminv(Mmatrix,r_new,n,xout,eps=1.)
       rinvnorm = xout
 
-      print *, 'A-1 norm of r :',rinvnorm 
+      !print *, 'A-1 norm of r :',rinvnorm 
 
       call Mmatrix(n,x_new,gap1)
       gap2 = gap1 - b
-      call matrixnorminv(Mmatrix,gap2 - r_new,n,res2,eps=eps1)
+      call matrixnorminv(Mmatrix,gap2 - r_new,n,res2,eps=1.)
       print *, 'residual gap norm: ', res2 
       write(*,*)
 
@@ -477,22 +495,16 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
       print *, 'approx quadratic at iteration ', iteration, ' = ', q2
       quad_vals(iteration+1) = q2 
 
-      allocate(q1(n))
       call Mmatrix(n,x_new,q1)
       q = 0.5*DOT_PRODUCT(x_new,q1) - DOT_PRODUCT(b,x_new)
       print *, 'exact quadratic value ', q
-      deallocate(q1)
       
     end if
 
-    inquire(file="icg_norm.csv",exist = exists)
-    if(exists) then
-       open(3,file='icg_norm.csv',form='formatted',status = 'old', position = 'append',action='write')
-    else
-       open(3,file='icg_norm.csv',form='formatted',status = 'new', position = 'append',action='write')
-    end if
-
-    write(3,'(F15.10,F15.10,F15.10,F15.10,F15.10,F15.10,F15.10)') sqrt(DOT_PRODUCT(r_new,r_new)),rinvnorm,omega,omega2,cf,q,res2
+    open(3, file='inexact_cg.csv', form='formatted', status='old', position='append')
+    write(3, '(I5,A,F15.10,A,F15.10,A,F15.10,A,F15.10,A,F15.10,A,F15.10,A,F15.10)') &
+      iteration, ',', sqrt(DOT_PRODUCT(r_new,r_new)), ',', rinvnorm, ',', &
+      omega, ',', omega2, ',', cf, ',', q, ',', res2
     close(3)
 
     ! stopping criterion
@@ -530,9 +542,127 @@ subroutine inexact_conjgrad(b,x,n,eps,nitermax,observation)
     iteration = iteration +1
   end do
 
+  deallocate(q1,u)
+
 print *, 'CG iterations: ', iteration
 
 end subroutine inexact_conjgrad
 
+
+subroutine conjgrad(matrix_v,b,x,n,eps,observation,exact_matrix)
+
+
+  procedure(matrix_vector) :: matrix_v
+  procedure(matrix_vector), optional :: exact_matrix
+  integer :: n,i,icf
+  real,dimension(n) :: b,x,obs
+  real :: eps
+
+  real,dimension(n) :: r,Ax,Ap,p,Apold,pold,ptmp
+  integer :: iteration
+
+  real :: rsold,rsnew,alpha,tmp,cf,res,tmp2,grad,quad
+  real, dimension(:), allocatable :: Aptmp
+  real, dimension(:,:), allocatable :: cftmp
+
+  logical :: file_exists
+  double precision :: dnrm2
+
+  real, dimension(n,Nobs), optional :: observation
+  real :: equad, cf_temp
+
+  call matrix_v(n,x,Ax)
+
+  r = b -Ax
+
+  if (verbose_cg .eqv. .true.) then
+    print *,'r = ',DOT_PRODUCT(r,r)
+    print *,'bnorm = ',DOT_PRODUCT(b,b),sqrt(DOT_PRODUCT(b,b))
+  end if
+  p = r
+  rsold = DOT_PRODUCT(r,r)
+
+  equad = -46.491068930860784
+
+  iteration = 1
+
+  inquire(file="conjgrad.csv", exist=file_exists)
+
+  if (.not. file_exists) then
+    open(2, file='conjgrad.csv', form='formatted', status='new')
+    write(2, '(A)') 'iteration,r2norm,cost_func,quadratic,Ainv_rnorm'
+    close(2)
+  end if
+
+  cf   = 0.0
+  quad = 0.0
+  tmp  = 0.0
+
+  do while (.TRUE.)
+
+    print *, '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
+    print *, 'CG iteration number ', iteration
+    write (*,*)
+    call matrix_v(n,p,Ap)
+
+    alpha = rsold / DOT_PRODUCT(p,Ap)
+    x = x + alpha * p
+    r = r - alpha * Ap
+    rsnew = DOT_PRODUCT(r,r)
+
+    if (verbose_cg .eqv. .true.) then
+      print *,'ratio = ',rsnew/rsold
+      print *,'iter = ',iteration,rsnew,'r2-norm: ',sqrt(rsnew)
+    end if
+   
+     if(present(observation)) then
+       allocate(cftmp(n,Nobs))
+       call Fmatrix(n,x,cftmp)
+       cf = 0.0
+       do icf = 1,Nobs
+         cf_temp = 0.5*(dnrm2(n,cftmp(:,icf) - observation(:,icf),1))**2
+         cf = cf + cf_temp
+       end do
+       if (regularisation) then
+         cf = cf + 0.5*alpharegul*(dnrm2(n,x,1))**2
+       end if
+       print *, 'cost func value: ', cf
+       deallocate(cftmp)
+     end if
+    !call matrixnorminv(exact_matrix,r,n,tmp)
+    !print *, 'A-1 norm of r: ',tmp
+    
+    if (PRESENT(exact_matrix)) then
+      allocate(Aptmp(n))
+      call exact_matrix(n,x,Aptmp)
+
+      quad = 0.5*DOT_PRODUCT(x,APtmp) - DOT_PRODUCT(b,x)
+      print *, 'quadratic value : ', quad
+
+      tmp =  SQRT(2*(quad - equad))
+      print *, 'A-1 norm of r', tmp
+      deallocate(Aptmp)
+    end if
+
+    open(2, file='conjgrad.csv', form='formatted', status='old', position='append')
+    write(2, '(I5,A,F15.10,A,F15.10,A,F15.10,A,F15.10)') &
+      iteration, ',', sqrt(rsnew), ',', cf, ',', quad, ',', tmp
+    close(2)
+
+    if (sqrt(rsnew) < eps) exit
+
+    p = r + (rsnew/rsold) * p
+    rsold = rsnew
+
+    iteration = iteration + 1
+    !print *, 'interation counter changes to iter = ', iteration
+  enddo
+
+  if (verbose_cg .eqv. .true.) then
+    print *, '%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%'
+    print *,'lastiter = ',iteration,rsnew,sqrt(rsnew)
+  end if
+
+end subroutine conjgrad
 
 end module inexact_version

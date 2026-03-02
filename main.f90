@@ -12,8 +12,8 @@ use shallow_water_adjoint
 use inexact_version
   
 integer :: i
-real, dimension(:), allocatable :: result,tmp,obs,B,x0,x1,x2,test,test2,r
-real, dimension(:,:), allocatable :: diffsol, cg_solution
+real, dimension(:), allocatable :: result,tmp,obs,B,x0,x1,x2,test,test2,r,obs1,B1,y
+real, dimension(:,:), allocatable :: diffsol, cg_solution, obs_sp
 real :: t1,t2,t3,t4
 real :: t5,t6,t7,t8
 real :: rnorm,xout,eps1
@@ -66,26 +66,28 @@ write(*,*) '##############################'
 call initialise_parareal(FineGrid,CoarseGrid)
 print *,'start parareal'
 
-!call Parareal(FineGrid,CoarseGrid,initial_xn,result,maxk=41,iter_out=it)
- 
-! call trans_1Dto2D(result,FineGrid%u,FineGrid%v,FineGrid%eta,FineGrid%nx, &
-!               FineGrid%ny,FineGrid%nx_1D,FineGrid%indices_1D)
-! diffsol=diffsol - FineGrid%eta
-! print *,'Error = ',sqrt(DOT_PRODUCT(reshape(diffsol,(/size(diffsol)/)),reshape(diffsol(/size(diffsol)/)))
 
+allocate(B,x0,x1,x2,y,mold=initial_xn)
 
-allocate(obs,B,x0,x1,x2,mold=initial_xn)
+allocate(obs_sp(FineGrid%nx_1D,Nobs))
 
-obs = initial_xn
-do i=1,N_time_windows
-  call integrate_sw(xn=obs,nt=Nfine)
-end do
+call initialise_obs_mask(FineGrid%nx_1D)
+
+call initialise_obs(initial_xn,FineGrid%nx_1D,obs_sp)
+
+print *, 'obs 1= ', obs_sp(:10,1)
+print *, 'obs 2= ', obs_sp(:10,2)
 
 do i=1,FineGrid%nx_1D
   ! print *,'obs = ',i,obs(i),initial_xn(i)
 end do
 
-call Bvector(FineGrid%nx_1D,obs,B)
+
+call Bvector(FineGrid%nx_1D,obs_sp,B)
+
+
+print *, 'obs diff = ', dnrm2(FineGrid%nx_1D,obs_sp(:,1)-obs_sp(:,2),1)
+
 
 do i=1,FineGrid%nx_1D
    !print *,'b = ',i,obs(i),B(i)
@@ -95,11 +97,10 @@ print *,'B vector computed'
 
 x0 = 0.
 
-!call Parareal(FineGrid,CoarseGrid,-B,result,maxk=41,iter_out=it)
 
 print *,'Begin conjgrad'
 call set_verbose(.TRUE.)
-!call my_cpu_time(t1)
+call my_cpu_time(t1)
 
 if (regularisation) then
   print *, 'Using regularisation constant, alpharegul = ', alpharegul
@@ -109,7 +110,7 @@ end if
 
 write (*,*) '############ Test 1 - Run exact CG with exact matrix ###########'
 write (*,*)
-!call conjgrad(Mmatrix,B,x0,FineGrid%nx_1D,eps=1.D-2,observation=obs,exact_matrix=Mmatrix,forward_matrix=Fmatrix)
+call conjgrad(Mmatrix,B,x0,FineGrid%nx_1D,eps=1.,observation=obs_sp,exact_matrix=Mmatrix)
 
 !call my_cpu_time(t2)
 !print *,'timing CG = ',t2-t1 
@@ -143,7 +144,7 @@ write (*,*)
 write (*,*) '############ Test 2 - Run exact CG with matrix from parareal ###########'
 write (*,*)
 
-call conjgrad(Mmatrix_parareal,B,x1,FineGrid%nx_1D,eps=1.D0,observation=obs,exact_matrix=Mmatrix,forward_matrix=Fmatrix)
+call conjgrad(Mmatrix_parareal,B,x1,FineGrid%nx_1D,eps=1.D0,observation=obs_sp,exact_matrix=Mmatrix)
 
 !call my_cpu_time(t6)
 !print *,'timing CG = ',t6-t5
@@ -152,26 +153,29 @@ call conjgrad(Mmatrix_parareal,B,x1,FineGrid%nx_1D,eps=1.D0,observation=obs,exac
 
 !!!!!!!! Find eps for inexact cg !!!!!!!!!!!
 
-!allocate(r(FineGrid%nx_1D),test(FineGrid%nx_1D))
+allocate(r(FineGrid%nx_1D),test(FineGrid%nx_1D))
 
-!call Mmatrix(FineGrid%nx_1D,x1,test)
-!r = test - B
-!call matrixnorminv(Mmatrix,r,FineGrid%nx_1D,rnorm)
-!print *, 'rnorm = ', rnorm
+call Mmatrix(FineGrid%nx_1D,x0,test)
+r = test - B
 
-!call matrixnorminv(Mmatrix,B,FineGrid%nx_1D,xout)
-!print *, 'bnorm = ', xout
+call matrixnorminv(Mmatrix,r,FineGrid%nx_1D,rnorm,eps=1.)
 
-!call get_tol(rnorm,xout,eps1)
+print *, 'rnorm = ', rnorm
 
-!print *, "inexact cg eps = ",eps1
-!!!!!!!!!!!!!!!!!!!!!!
+call matrixnorminv(Mmatrix,B,FineGrid%nx_1D,xout,eps=1.)
+print *, 'bnorm = ', xout
+
+call get_tol(rnorm,xout,eps1)
+
+print *, "inexact cg eps = ",eps1
+!!!!!!!!!!!!!!!!!!!!
 
 !deallocate(r)
-!eps1 = 9.0799496506838787E-002
+
 
 ! alpharegul = 5
-eps1 = 1.0753282746828472E-002
+!eps1 = 1.0753282746828472E-002
+!eps1 = 3.4244845974921008E-004
 print *, 'inexact cg eps = ', eps1
 
 x2 = 0.
@@ -180,12 +184,12 @@ nitermax=20
 call my_cpu_time(t7)
 write (*,*)
 write (*,*) '############ Test 3 - Run inexact CG with parareal ###########'
-!call inexact_conjgrad(B,x2,FineGrid%nx_1D,eps=eps1,nitermax=nitermax,observation=obs)
+call inexact_conjgrad(B,x2,FineGrid%nx_1D,eps=eps1,nitermax=nitermax,observation=obs_sp)
 
 call my_cpu_time(t8)
 print *, 'timing inexact CG = ',t8-t7
 
-!call give_output(cg_solution)
+call give_output(cg_solution)
 
 
 contains
@@ -197,11 +201,11 @@ real, dimension(:,:), allocatable :: sol
 
 call change_output(.true.)
 
-call initialise_sw(x0)
+call initialise_sw(x1)
 call CreateNetCDF()
 allocate(sol(FineGrid%nx_1D,0:N_time_windows))
 
-initial_xn = x0
+initial_xn = x1
 sol(:,0) = initial_xn 
 
 call OutPutNetCDF()

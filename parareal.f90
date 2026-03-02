@@ -7,6 +7,15 @@ use shallow_water
 use shallow_water_adjoint
 use eigenvalues
 
+
+!################### observations ########################
+integer :: iobs
+integer, parameter :: Nobs = 4
+integer, dimension(Nobs), parameter :: obs_windows = (/10,20,30,40/)
+logical, dimension(:,:), allocatable :: obs_mask
+!########################################################
+
+
 integer, parameter :: N_time_windows = 40   !< Number of time windows
 integer :: Nfine = 20                       !< Number of fine time steps per time window
 integer :: q = 5                           !< Number of coarse time steps per time window
@@ -25,7 +34,7 @@ logical, parameter :: debug = .false.
 
 !################## regularisation #######################
 logical, parameter :: regularisation = .true. 
-real :: alpharegul = 5 
+real :: alpharegul =  15
 !#########################################################
 
 ! The maximum number of vectors in the subspace S (Krylov Enhanced) is given by decal*N_time_windows
@@ -66,6 +75,37 @@ real, dimension(:), allocatable :: lambda_in, lambda_out
 type(grid), pointer :: Finesolver, Coarsesolver
 
 contains
+
+subroutine initialise_obs(initial_xn,nx,obs_sparse)
+
+integer :: i, j, iobs, nx
+real, dimension(nx) :: initial_xn, obs
+real, dimension(nx,Nobs) :: mobs, obs_sparse
+
+mobs = 0.
+iobs = 1
+
+obs = initial_xn
+
+do i = 1, N_time_windows
+  call integrate_sw(xn=obs,nt=Nfine)
+
+  if (i == obs_windows(iobs)) then
+    mobs(:,iobs) = obs
+    iobs = iobs +1
+  end if
+
+end do
+
+obs_sparse=0.0
+do j=1,Nobs
+    obs_sparse(:,j) = 0.0
+    where (obs_mask(:, j)) obs_sparse(:, j) = mobs(:, j)
+end do
+
+end subroutine
+
+
 
 !> @brief Initialise parareal. Done by defining coarse and fine solvers, allocating memory to compute iterations.
 !> @param[in] F fine solver
@@ -115,13 +155,14 @@ end subroutine set_pverbose
 !> @param[out] lambdaout solution
 !> @param[in] maxk maximum parareal iterations
 !> @param[in] eps parareal tolerance
-subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess)
+subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_iterates)
 
   type(grid), pointer :: F,G
   real, dimension(F%nx_1D) :: lambda0
   real, dimension(F%nx_1D) :: lambda1,lambda2,lambda3    
   real, dimension(:), allocatable :: lambdaout
   real, dimension(:,:), allocatable, optional :: full_sol
+  real, dimension(F%nx_1D,N_time_windows,N_time_windows), optional :: all_iterates
   real, dimension(F%nx_1D), optional :: guess
   integer, optional :: maxk    
   real, optional :: eps       
@@ -138,6 +179,7 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess)
   !conditions
   real, dimension(F%nx_1D,max_nb_vectors) :: Fmatrix_rli, lambdamatrix_rli  ! same matrix with removed linearly independent vectors 
   ! as seen after Gram Schmidt
+
 
   real :: err
   real :: t1,t2,t3,t4,t5,t6,t7,t8
@@ -582,6 +624,9 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess)
   end if
   
 
+  if (present(all_iterates)) then
+      all_iterates= lambdank(:,1:N_time_windows,1:p)
+  end if
   lambdaout = lambdank(:,N_time_windows,p)
   iter_out = p
 
@@ -629,22 +674,33 @@ end subroutine integrate_over_time_windows
 subroutine Mmatrix(nx,x,y,k)
 
   integer :: nx
-  real, dimension(nx) :: x,y,y1
+  real, dimension(nx) :: x,y,y1,temp
 
-  integer :: i
+  integer :: i,j,l
   integer, optional :: k
 
-  y=x
-  ! forward computation FN*x
-  do i=0,N_time_windows-1
-    ! print *,'I = ',I
-    call integrate_sw(xn=y,nt=curgrid%nt_time_windows)
-  end do
+  y = 0.
 
-  ! backward computation FN^T*(FN*x)
-  do i=N_time_windows-1,0,-1
-    ! print *,'I2 = ',I
-    call INTEGRATE_SW_ADJOINT(xnb=y,nt=curgrid%nt_time_windows)
+  do i = 1, Nobs
+
+    temp = x
+
+    ! forward computation FN*x
+    do j=0,obs_windows(i)-1
+      ! print *,'I = ',I
+      call integrate_sw(xn=temp,nt=curgrid%nt_time_windows)
+    end do
+
+    ! Apply observation mask before adjoint
+    where (.not. obs_mask(:,i)) temp = 0.0
+
+    ! backward computation FN^T*(FN*x)
+    do l=obs_windows(i)-1,0,-1
+      ! print *,'I2 = ',I
+      call INTEGRATE_SW_ADJOINT(xnb=temp,nt=curgrid%nt_time_windows)
+    end do
+
+    y = y + temp
   end do
   
   if (regularisation) then
@@ -660,20 +716,22 @@ end subroutine Mmatrix
 subroutine Mmatrix_parareal(nx,x,y,k)
 
   integer :: nx
-  real, dimension(nx) :: x,y,y1
+  real, dimension(nx) :: x,y,y1,temp
   ! input - x,  result - y
 
   real, dimension(:), allocatable :: result
-  integer :: i, it_out
+  integer :: i, j, p, it_out, iter
   integer, optional :: k
+  real, dimension(nx,N_time_windows,N_time_windows) :: all_iter
 
-  y=x
+  !y=x
   !do i=0,N_time_windows-1
     ! print *,'I = ',I
     ! call integrate_sw(xn=y,nt=curgrid%nt_time_windows)
   !end do
   !print *,'x = ',sum(abs(x))
   !print *,'y = ',sum(abs(y))
+
   
   if (sum(abs(x)) == 0.) then
     ! if the starting vector is zero the result is zero
@@ -681,20 +739,51 @@ subroutine Mmatrix_parareal(nx,x,y,k)
   else
     call set_pverbose(.false.)
     if (PRESENT(k)) then
-      call Parareal(FineGrid,CoarseGrid,x,result,maxk=k,iter_out=it_out)
+      call Parareal(FineGrid,CoarseGrid,x,result,maxk=k,iter_out=it_out,all_iterates=all_iter)
     else
-      call Parareal(FineGrid,CoarseGrid,x,result,eps=1.D-1,iter_out=it_out)
+      call Parareal(FineGrid,CoarseGrid,x,result,eps=1.D-1,iter_out=it_out,all_iterates=all_iter)
     end if
-    y = result
   end if
   
   call set_pverbose(.true.)
 
-  do i=N_time_windows-1,0,-1
-    ! print *,'I2 = ', I
-    call INTEGRATE_SW_ADJOINT(xnb=y,nt=curgrid%nt_time_windows)
-  end do
-  
+  y = 0.
+  if (PRESENT(k)) then
+    do i = 1, Nobs
+      temp = all_iter(:,obs_windows(i),it_out)
+      ! obs already masked from initialise_obs, but apply again for safety
+      where (.not. obs_mask(:,i)) temp = 0.0
+
+      do j=obs_windows(i)-1,0,-1
+        ! print *,'I2 = ', I
+        call INTEGRATE_SW_ADJOINT(xnb=temp,nt=curgrid%nt_time_windows)
+      end do
+
+      y = y+ temp
+    end do
+
+  else
+    
+    do i = 1, Nobs
+!      do p =1,it_out
+!        if (ew(obs_windows(i),p) < 1.d-1) then
+!          iter = p
+!          exit
+!        end if
+!      end do
+      temp = all_iter(:,obs_windows(i),it_out)
+      where (.not. obs_mask(:, i)) temp = 0.0
+
+      do j=obs_windows(i)-1,0,-1
+        ! print *,'I2 = ', I
+        call INTEGRATE_SW_ADJOINT(xnb=temp,nt=curgrid%nt_time_windows)
+      end do
+
+      y = y+ temp
+    end do
+
+  end if
+
   if (regularisation) then
     call identity_matrix(nx,x,y1)
     y = y + alpharegul*y1
@@ -705,16 +794,22 @@ end subroutine Mmatrix_parareal
 subroutine Fmatrix(nx,x,y,k)
 
   integer :: nx
-  real, dimension(nx) :: x,y,y1
+  real, dimension(nx,Nobs) :: y
+  real, dimension(nx) :: x,y1,temp
 
-  integer :: i
+  integer :: i, j
   integer, optional :: k
 
-  y=x
+  y=0.0
   ! forward computation FN*x
-  do i=0,N_time_windows-1
-    ! print *,'I = ',I
-    call integrate_sw(xn=y,nt=curgrid%nt_time_windows)
+  do i = 1, Nobs
+    temp=x
+    do j=0,obs_windows(i)-1
+      ! print *,'I = ',I
+      call integrate_sw(xn=temp,nt=curgrid%nt_time_windows)
+    end do
+    where (.not. obs_mask(:, i)) temp = 0.0
+    y(:,i) = y(:,i) + temp
   end do
 
 end subroutine Fmatrix
@@ -739,14 +834,25 @@ end subroutine
 subroutine Bvector(nx,x,y)
 
   integer :: nx
-  real, dimension(nx) :: x,y
+  real, dimension(nx) :: y, temp
+  real, dimension(nx,nobs) :: x
 
-  integer :: i
+  integer :: i,j
+
+  y=0.
+  do i = 1,Nobs
   
-  y=x
-  do i=N_time_windows-1,0,-1
-    call INTEGRATE_SW_ADJOINT(xnb=y,nt=curgrid%nt_time_windows)
+    temp = x(:,i)
+
+    ! obs already masked from initialise_obs, but apply again for safety
+    where (.not. obs_mask(:,i)) temp = 0.0
+
+    do j=obs_windows(i)-1,0,-1
+      call INTEGRATE_SW_ADJOINT(xnb=temp,nt=curgrid%nt_time_windows)
+    end do
+    y = y + temp
   end do
+
 
 end subroutine Bvector
 
@@ -767,5 +873,28 @@ subroutine identity_matrix(nx,x,y)
 end subroutine identity_matrix
 
 
+subroutine initialise_obs_mask(nx)
+
+  integer, intent(in) :: nx
+
+  if (allocated(obs_mask)) deallocate(obs_mask)
+  allocate(obs_mask(nx, Nobs))
+  obs_mask = .false.
+  if (Nobs == 1) then
+    obs_mask = .true.
+  end if 
+
+  if (Nobs > 1) then
+    if (Nobs ==4) then
+      obs_mask(1:nx:2, 1) = .true.
+      obs_mask(1:nx:4, 2) = .true.
+      obs_mask(1:nx:2, 3) = .true.
+      obs_mask(1:nx:4, 4) = .true.
+    end if
+  else
+    obs_mask(1:nx:2, :) = .true.
+  end if
+
+end subroutine initialise_obs_mask
 
 end module parareal_utils
