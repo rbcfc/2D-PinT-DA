@@ -10,11 +10,10 @@ use eigenvalues
 
 !################### observations ########################
 integer :: iobs
-integer, parameter :: Nobs = 4
-integer, dimension(Nobs), parameter :: obs_windows = (/10,20,30,40/)
-logical, dimension(:,:), allocatable :: obs_mask
+integer, parameter :: Nobs = 4                                          !< Number of observations
+integer, dimension(Nobs), parameter :: obs_windows = (/10,20,30,40/)    !< Time windows at which the observations are available
+logical, dimension(:,:), allocatable :: obs_mask                        !< Observation operator for partial obs; done by masking
 !########################################################
-
 
 integer, parameter :: N_time_windows = 40   !< Number of time windows
 integer :: Nfine = 20                       !< Number of fine time steps per time window
@@ -30,6 +29,10 @@ logical, parameter :: Krylov_Enhanced = .true.  !< Use the Krylov_Enhanced parar
 ! if (debug = .TRUE.) we check that the image of the subspace S are correctly computed
 ! (Krylov Enhanced case only)
 logical, parameter :: debug = .false.
+! The maximum number of vectors in the subspace S (Krylov Enhanced) is given by decal*N_time_windows
+integer, parameter :: decal = 30  !< the shift, used for keeping only latest vectors 
+
+logical, parameter :: incomplete_projection = .true.
 !#########################################################
 
 !################## regularisation #######################
@@ -37,15 +40,9 @@ logical, parameter :: regularisation = .true.
 real :: alpharegul =  15
 !#########################################################
 
-! The maximum number of vectors in the subspace S (Krylov Enhanced) is given by decal*N_time_windows
-integer, parameter :: decal = 30  !< the shift, used for keeping only latest vectors 
-
-logical, parameter :: incomplete_projection = .true.
-
 real, dimension(:,:,:), allocatable :: lambdank       !< array for storing solution from all the parareal iterations
 real, dimension(:,:,:), allocatable :: Flambdank      !< array for storing all fine solver evaluations   
-real, dimension(:,:), allocatable :: U_matrix_GS      !< array of orthogonal vectors (basis for subspace S, can call U) 
-                                                      !< obtained from the Gram-Schmidt process
+real, dimension(:,:), allocatable :: U_matrix_GS      !< array of orthogonal vectors (basis for subspace S, can call U) obtained from the Gram-Schmidt process
 real, dimension(:,:), allocatable :: U_matrix_test 
 
 integer :: nb_vectors_limgs   !< number of linearly independent vectors obtained from Gram-Schmidt process
@@ -161,8 +158,9 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_i
   real, dimension(F%nx_1D) :: lambda0
   real, dimension(F%nx_1D) :: lambda1,lambda2,lambda3    
   real, dimension(:), allocatable :: lambdaout
-  real, dimension(:,:), allocatable, optional :: full_sol
-  real, dimension(F%nx_1D,N_time_windows,N_time_windows), optional :: all_iterates
+  real, dimension(:,:), allocatable, optional :: full_sol    !< stores Parareal solution at the last time window for all iterations
+  real, dimension(F%nx_1D,N_time_windows,N_time_windows), optional :: all_iterates  !< stores solution at all time windows for all
+                                                                                    !< iterations
   real, dimension(F%nx_1D), optional :: guess
   integer, optional :: maxk    
   real, optional :: eps       
@@ -217,12 +215,6 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_i
     end if
   end if
 
-  !if (present(maxk)) then
-    !maxind = maxk 
-  !else
-    !maxind = N_time_windows
-  !end if
-
   !write (*,*) 'maxind = ', maxind
 
   ! define the size of lambdank --> allocate(lambdank(size(lambda0),0:N_time_windows,maxind+1))
@@ -235,7 +227,6 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_i
   end if
 
   p = 0   ! iteration 0
-
   if (present(guess)) then
     lambdank(:,0,p) = guess
   else
@@ -512,25 +503,18 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_i
 
         if (use_coarse_solver) then   ! updated coarse solver from Krylov_Enhanced
           ! Compute (I-P)*X = X - U U^T X = X - U C
-
           lambda2 = lambda1
-
           ! U C
-
           lambda3 = MATMUL(U_matrix_GS(:,1:nb_vectors_limgs),C(1:nb_vectors_limgs))
 
           ! For information check the projection against U
-
           do i =1,nb_vectors_limgs
             ! print *, 'Proj on basis vector ',i,' = ', DOT_PRODUCT(lambda3,U_matrix_GS(:,i))
           end do
-
           lambda1 = lambda1 - lambda3
-
           ! print *, 'projection = ',dnrm2(nx_F,lambda1,1)/dnrm2(nx_F,lambda2,1),dnrm2(nx_F,lambda2,1),dnrm2(nx_F,lambda1,1)
 
           call my_cpu_time(t18)
-
           call set_solver_prec(coarse_solver_prec)
 
           curgrid=>G
@@ -570,17 +554,6 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_i
 
     err = sqrt(err)
     print *,'Iteration = ',p,'err = ',err
-
-    !inquire(file="para_error.csv",exist = exists)
-    !if(exists) then
-       !open(4,file='para_error.csv',form='formatted',status = 'old', position = 'append',action='write')
-    !else
-       !open(4,file='para_error.csv',form='formatted',status = 'new', position = 'append',action='write')
-    !end if
-
-    !write(4,'(F20.14)') err  
-    !close(4)
-
 
     if (present(eps)) then
       if (err<=eps) exit
@@ -622,23 +595,12 @@ subroutine Parareal(F,G,lambda0,lambdaout,maxk,eps,iter_out,full_sol,guess,all_i
       full_sol = lambdank(:,N_time_windows,0:p)
     end if
   end if
-  
 
   if (present(all_iterates)) then
       all_iterates= lambdank(:,1:N_time_windows,1:p)
   end if
   lambdaout = lambdank(:,N_time_windows,p)
   iter_out = p
-
-  !inquire(file="ecg_norm.csv",exist = exists)
-  !if(exists) then
-     !open(1,file='ecg_norm.csv',form='formatted',status = 'old', position = 'append',action='write')
-  !else
-     !open(1,file='ecg_norm.csv',form='formatted',status = 'new', position = 'append',action='write')
-  !end if
-
-  !write(1,"(I2)") iter_out
-  !close(1)
 
   write (*,*) 'Total parareal iterations', iter_out  
   if (verbose_p .eqv. .true.) then
@@ -704,7 +666,7 @@ subroutine Mmatrix(nx,x,y,k)
   end do
   
   if (regularisation) then
-    call identity_matrix(nx,x,y1)
+    call weighting_matrix(nx,x,y1)
     y = y + alpharegul*y1
   end if
 
@@ -765,12 +727,6 @@ subroutine Mmatrix_parareal(nx,x,y,k)
   else
     
     do i = 1, Nobs
-!      do p =1,it_out
-!        if (ew(obs_windows(i),p) < 1.d-1) then
-!          iter = p
-!          exit
-!        end if
-!      end do
       temp = all_iter(:,obs_windows(i),it_out)
       where (.not. obs_mask(:, i)) temp = 0.0
 
@@ -785,7 +741,7 @@ subroutine Mmatrix_parareal(nx,x,y,k)
   end if
 
   if (regularisation) then
-    call identity_matrix(nx,x,y1)
+    call weighting_matrix(nx,x,y1)
     y = y + alpharegul*y1
   end if
 
@@ -857,8 +813,8 @@ subroutine Bvector(nx,x,y)
 end subroutine Bvector
 
 
-!Define the identity matrix, x -> Ix
-subroutine identity_matrix(nx,x,y)
+!Define the weighting matrix, x -> Wx
+subroutine weighting_matrix(nx,x,y)
   
   integer, dimension(nx,nx) :: id_mat
   real, dimension(nx) :: x,y
@@ -870,11 +826,11 @@ subroutine identity_matrix(nx,x,y)
   
   y = MATMUL(id_mat,x)
   
-end subroutine identity_matrix
+end subroutine weighting_matrix
 
 
 subroutine initialise_obs_mask(nx)
-
+! define observation operator by masking the observation values at time windows
   integer, intent(in) :: nx
 
   if (allocated(obs_mask)) deallocate(obs_mask)
@@ -885,6 +841,8 @@ subroutine initialise_obs_mask(nx)
   end if 
 
   if (Nobs > 1) then
+    ! when using 4 obs, the obs operator maps to every second state variable for first and third obs
+    ! and every fourth state variable for second and fourth obs
     if (Nobs ==4) then
       obs_mask(1:nx:2, 1) = .true.
       obs_mask(1:nx:4, 2) = .true.

@@ -2,6 +2,28 @@
 !> @authors
 !> Rishabh Bhatt, Laurent Debreu, Arthur Vidard
 
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+! Program: main
+!
+! Description:
+!   Solves the linear system obtained when using the Parareal algorithm for the 
+!   tangent-linear integrations in the inner loop of incremental 4D-Var. The 
+!   model here is the linearised 2D rotating shallow water equations and the 
+!   minimisation uses the Conjugate Gradient (CG) method
+!   Three CG variants are tested:
+!     1. Exact CG with exact matrix
+!     2. Exact CG with Parareal matrix approximation
+!     3. Inexact CG with Parareal
+!
+! Dependencies:
+!   - shallow_water
+!   - parareal_utils
+!   - eigenvalues
+!   - output_netcdf
+!   - shallow_water_adjoint
+!   - inexact_version
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 program main
 
 use shallow_water
@@ -10,35 +32,36 @@ use eigenvalues
 use output_netcdf
 use shallow_water_adjoint
 use inexact_version
-  
+
 integer :: i
-real, dimension(:), allocatable :: result,tmp,obs,B,x0,x1,x2,test,test2,r,obs1,B1,y
-real, dimension(:,:), allocatable :: diffsol, cg_solution, obs_sp
-real :: t1,t2,t3,t4
-real :: t5,t6,t7,t8
-real :: rnorm,xout,eps1
 integer :: it, nitermax
-real :: e_quad, e_cf
+
+real :: t1,t2,t3,t4,t5,t6,t7,t8
+real :: rnorm,xout,eps1
+
+real, dimension(:), allocatable :: obs,B,x0,x1,x2,test,r,y
+real, dimension(:,:), allocatable :: cg_solution, obs_sp  ! obs_sp: array of sparse observations
 
 double precision :: dnrm2
+
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+! Initialise shallow water model
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 call initialise_sw()
-
 call CreatenetCDF()
-!call compute_matrix_sw()
-!print *,'Matrix computed'
 
-!Computing the true solution using sequential fine solver
+! Compute the true solution using sequential fine solver
 allocate(Truesolution(FineGrid%nx_1D,0:N_time_windows))
-
 Truesolution(:,0) = initial_xn
 
 call OutPutNetCDF()
 
 write(*,*)
-call my_cpu_time(t3)
+!call my_cpu_time(t3)
 do i=1,N_time_windows
 
-  print *,'I = ',i,maxval(FineGrid%eta)
+  write(*,*) 'Time window i = ',i, 'max(eta)', maxval(FineGrid%eta)
   call integrate_sw(etan=FineGrid%eta,un=Finegrid%u,vn=FineGrid%v,nt=Nfine)
 
   call trans_2Dto1D(FineGrid%u,FineGrid%v,FineGrid%eta,Truesolution(:,i),FineGrid%nx,FineGrid%ny, &
@@ -46,183 +69,136 @@ do i=1,N_time_windows
   call OutPutNetCDF()
 end do
 call my_cpu_time(t4)
-t4=t4-t3
-print *,'Timing non parareal = ',t4
+!t4=t4-t3
+!write(*,*),'Timing non parareal = ',t4
 write(*,*)
 
 call CloseNetCDF()
 
 
-allocate(diffsol,mold=FineGrid%eta)
-diffsol = FineGrid%eta
-open(10,file='output',form='formatted')
-do i=1,FineGrid%nx
-   !write(10,*) FineGrid%xr(i),FineGrid%eta(i)
-end do
-close(10)
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+! Parareal initialisation
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-write(*,*) '##############################'
+write(*, *) repeat('#', 30)
 
 call initialise_parareal(FineGrid,CoarseGrid)
-print *,'start parareal'
+write(*,*) 'Parareal initialised'
 
-
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+! Observation initialisation
+!~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 allocate(B,x0,x1,x2,y,mold=initial_xn)
-
 allocate(obs_sp(FineGrid%nx_1D,Nobs))
 
 call initialise_obs_mask(FineGrid%nx_1D)
-
 call initialise_obs(initial_xn,FineGrid%nx_1D,obs_sp)
 
-print *, 'obs 1= ', obs_sp(:10,1)
-print *, 'obs 2= ', obs_sp(:10,2)
-
-do i=1,FineGrid%nx_1D
-  ! print *,'obs = ',i,obs(i),initial_xn(i)
-end do
-
-
 call Bvector(FineGrid%nx_1D,obs_sp,B)
-
-
-print *, 'obs diff = ', dnrm2(FineGrid%nx_1D,obs_sp(:,1)-obs_sp(:,2),1)
-
-
-do i=1,FineGrid%nx_1D
-   !print *,'b = ',i,obs(i),B(i)
-end do
-
-print *,'B vector computed'
+write(*,*) 'B vector computed'
 
 x0 = 0.
 
-
-print *,'Begin conjgrad'
+write(*,*) 'Begin conjgrad'
 call set_verbose(.TRUE.)
-call my_cpu_time(t1)
 
 if (regularisation) then
-  print *, 'Using regularisation constant, alpharegul = ', alpharegul
+  write(*,*) 'Using regularisation constant, alpharegul = ', alpharegul
 else
-  print *, 'No regularisation used'
+  write(*,*) 'No regularisation used'
 end if
 
-write (*,*) '############ Test 1 - Run exact CG with exact matrix ###########'
+write (*,*) repeat('#',10), 'Test 1: Run exact CG with exact matrix ', repeat('#',10)
 write (*,*)
+!call my_cpu_time(t1)
 call conjgrad(Mmatrix,B,x0,FineGrid%nx_1D,eps=1.,observation=obs_sp,exact_matrix=Mmatrix)
-
 !call my_cpu_time(t2)
-!print *,'timing CG = ',t2-t1 
-!print *,'difference from initial state = ', dnrm2(FineGrid%nx_1D,x0-initial_xn,1)
+!write(*,*) 'timing CG = ',t2-t1 
 
-
-!allocate(test2(FineGrid%nx_1D))
-!e_cf = 0.5*(dnrm2(FineGrid%nx_1D,test2 - obs,1))**2
-!if (regularisation) then
-!  e_cf = e_cf + 0.5*alpharegul*(dnrm2(FineGrid%nx_1D,x0,1))**2
-!end if
-!print *, "exact cost function value ", e_cf
-!deallocate(test2)
-
-!allocate(test2(FineGrid%nx_1D))
-!call Mmatrix(FineGrid%nx_1D,x0,test2)
-!xout = dnrm2(FineGrid%nx_1D,test2 - B,1)
-!print *, "exact grad value ", xout
-!deallocate(test2)
-
-!allocate(test(FineGrid%nx_1D))
-!call Mmatrix(FineGrid%nx_1D,x0,test)
-!e_quad = 0.5*DOT_PRODUCT(x0,test) - DOT_PRODUCT(B,x0)
-!print *, "exact quadratic value ", e_quad
-!deallocate(test)
 
 x1 = 0.
-
+write (*,*)
+write(*, *) repeat('#', 10), ' Test 2: Exact CG with Parareal matrix ', repeat('#', 10)
+write (*,*)
 !call my_cpu_time(t5)
-write (*,*)
-write (*,*) '############ Test 2 - Run exact CG with matrix from parareal ###########'
-write (*,*)
-
 call conjgrad(Mmatrix_parareal,B,x1,FineGrid%nx_1D,eps=1.D0,observation=obs_sp,exact_matrix=Mmatrix)
-
 !call my_cpu_time(t6)
-!print *,'timing CG = ',t6-t5
+!write(*,*) 'timing CG = ',t6-t5
 !stop
 
 
-!!!!!!!! Find eps for inexact cg !!!!!!!!!!!
-
+! Compute tolerance for inexact CG
 allocate(r(FineGrid%nx_1D),test(FineGrid%nx_1D))
 
 call Mmatrix(FineGrid%nx_1D,x0,test)
 r = test - B
 
 call matrixnorminv(Mmatrix,r,FineGrid%nx_1D,rnorm,eps=1.)
-
-print *, 'rnorm = ', rnorm
+write(*,*) 'Residual norm (rnorm) = ', rnorm
 
 call matrixnorminv(Mmatrix,B,FineGrid%nx_1D,xout,eps=1.)
-print *, 'bnorm = ', xout
+write(*,*) 'RHS norm (bnorm) = ', xout
 
 call get_tol(rnorm,xout,eps1)
 
-print *, "inexact cg eps = ",eps1
-!!!!!!!!!!!!!!!!!!!!
-
-!deallocate(r)
-
-
-! alpharegul = 5
-!eps1 = 1.0753282746828472E-002
-!eps1 = 3.4244845974921008E-004
-print *, 'inexact cg eps = ', eps1
+write(*,*) "inexact CG tolerance (eps) = ",eps1
+deallocate(r)
 
 x2 = 0.
 nitermax=20
-
-call my_cpu_time(t7)
 write (*,*)
-write (*,*) '############ Test 3 - Run inexact CG with parareal ###########'
+write(*, *) repeat('#', 10), ' Test 3: Inexact CG with Parareal ', repeat('#', 10)
+!call my_cpu_time(t7)
 call inexact_conjgrad(B,x2,FineGrid%nx_1D,eps=eps1,nitermax=nitermax,observation=obs_sp)
-
-call my_cpu_time(t8)
-print *, 'timing inexact CG = ',t8-t7
+!call my_cpu_time(t8)
+!write(*,*) 'timing inexact CG = ',t8-t7
 
 call give_output(cg_solution)
 
 
 contains
 
-subroutine give_output(sol)
+  !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  ! Subroutine: give_output
+  !
+  ! Description:
+  !   Runs the forward shallow water model from the CG-retrieved initial
+  !   condition (x1) and writes the resulting trajectory to a NetCDF file
+  !   named 'cg_output.nc'.
+  !
+  ! Arguments:
+  !   sol (out) - 2D array storing the model state at each time window
+  !~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-real, dimension(:,:), allocatable :: sol
-
-
-call change_output(.true.)
-
-call initialise_sw(x1)
-call CreateNetCDF()
-allocate(sol(FineGrid%nx_1D,0:N_time_windows))
-
-initial_xn = x1
-sol(:,0) = initial_xn 
-
-call OutPutNetCDF()
-
-do i=1,N_time_windows
-  print *,'I = ',i,maxval(FineGrid%eta)
-  call integrate_sw(etan=FineGrid%eta,un=FineGrid%u,vn=FineGrid%v,nt=Nfine)
-
-  call trans_2Dto1D(FineGrid%u,FineGrid%v,FineGrid%eta,sol(:,i),FineGrid%nx,FineGrid%ny, &
-                FineGrid%nx_1D,FineGrid%indices_1D)
-  call outPutNetCDF()
-end do
-
-call CloseNetCDF()
-deallocate(sol)
-
-end subroutine give_output  
+  subroutine give_output(sol)
+  
+  real, dimension(:,:), allocatable :: sol
+  
+  ! to change the name of file to cg_output.nc, else overwrites output.nc
+  call change_output(.true.)
+  
+  call initialise_sw(x1)    ! uses x1 to initialise the shallow water model, initial state can be changed
+  call CreateNetCDF()
+  allocate(sol(FineGrid%nx_1D,0:N_time_windows))
+  
+  initial_xn = x1
+  sol(:,0) = initial_xn 
+  
+  call OutPutNetCDF()
+  
+  do i=1,N_time_windows
+    write(*,*) 'Time window i = ',i, 'max(eta)', maxval(FineGrid%eta)
+    call integrate_sw(etan=FineGrid%eta,un=FineGrid%u,vn=FineGrid%v,nt=Nfine)
+  
+    call trans_2Dto1D(FineGrid%u,FineGrid%v,FineGrid%eta,sol(:,i),FineGrid%nx,FineGrid%ny, &
+                  FineGrid%nx_1D,FineGrid%indices_1D)
+    call outPutNetCDF()
+  end do
+  
+  call CloseNetCDF()
+  deallocate(sol)
+  
+  end subroutine give_output  
 
 
 
